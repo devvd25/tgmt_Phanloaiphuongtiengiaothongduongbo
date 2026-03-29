@@ -1,0 +1,13 @@
+.vscode/
+.venv/
+__pycache__/
+*.pyc
+
+# Project-specific generated or large files
+traffic-classification/dataset/
+traffic-classification/hf_space/
+traffic-classification/.gradio/
+traffic-classification/__pycache__/
+traffic-classification/model/*.h5
+traffic-classification/model/*.png
+traffic-classification/model/*.txt
