@@ -105,10 +105,10 @@ Quy trình huấn luyện trong [train.py](train.py):
 - Lưu model `.h5`, class map, biểu đồ lịch sử train.
 
 Quy trình dự đoán trong [predict.py](predict.py) và [gui.py](gui.py):
-- Đọc ảnh.
-- Resize + normalize + BGR->RGB.
-- Chạy `model.predict` để lấy vector xác suất 4 lớp.
-- Sắp xếp xác suất và hiển thị top-k.
+- Dò tất cả phương tiện trong ảnh bằng detector YOLO (Ultralytics).
+- Chuẩn hóa mỗi vùng xe về khung vuông (square box) rồi crop ảnh xe.
+- Chạy bộ phân loại VGG16 cho từng xe để lấy xác suất 4 lớp.
+- Vẽ khung vuông + nhãn lên từng xe và hiển thị danh sách kết quả.
 
 ## 6) Cách thức hoạt động của phương pháp
 
@@ -121,7 +121,30 @@ Luồng hoạt động từ đầu đến cuối:
 5. Sau khi head ổn định, fine-tune một phần backbone để thích nghi tốt hơn với dữ liệu thực tế.
 6. Khi dự đoán ảnh mới, mô hình trả về xác suất từng lớp; lớp có xác suất cao nhất là kết quả top-1.
 
-## 7) Cách chạy nhanh
+## 7) Frontend/Backend và chức năng từng file
+
+### Frontend (UI)
+- gui.py: Giao diện Tkinter cho phép chọn ảnh, phát hiện tất cả xe trong ảnh, khoanh vùng hình vuông và hiển thị nhãn từng xe.
+
+### Backend (ML + logic xử lý)
+- train.py: Huấn luyện VGG16 transfer learning, lưu model, lịch sử train, confusion matrix.
+- predict.py: Dự đoán ảnh đơn hoặc webcam, hỗ trợ phát hiện nhiều xe và in kết quả từng box.
+- utils.py: Tiền xử lý ảnh, tạo model, multi-crop inference, đọc ảnh Unicode, phát hiện xe, phân loại từng box và vẽ kết quả.
+- normalize_dataset.py: Chuẩn hóa tên thư mục lớp và đổi tên/định dạng ảnh về PNG.
+- resplit_dataset.py: Loại trùng, chia lại train/test, tự động backup trước khi chia.
+- ingest_archive_dataset.py: Nhập dữ liệu từ thư mục archive/Dataset vào dataset hiện tại, đổi tên theo chuẩn.
+
+### Thư mục dữ liệu/kết quả
+- dataset/: Dữ liệu chuẩn theo train/test dùng để huấn luyện và đánh giá.
+- model/: Model đã train, class map, hình/lưu confusion matrix.
+- outputs/: Thư mục lưu output khác (nếu có).
+- archive/: Nguồn dữ liệu gốc (đã tải thêm), dùng để ingest vào dataset.
+
+### Tệp cấu hình/phụ trợ
+- requirements.txt: Danh sách thư viện cần cài.
+- README.md: Tài liệu dự án.
+
+## 8) Cách chạy nhanh
 
 ### Cài thư viện
 ```bash
@@ -138,12 +161,16 @@ python train.py --epochs 15 --batch_size 32
 python predict.py duong_dan_anh.png --topk 4
 ```
 
+Lưu ý:
+- `--topk` là top-k cho từng xe đã phát hiện.
+- Dự án cần thư viện `ultralytics` để phát hiện nhiều phương tiện trong ảnh.
+
 ### Mở giao diện GUI
 ```bash
 python gui.py
 ```
 
-## 8) Tệp kết quả sau huấn luyện
+## 9) Tệp kết quả sau huấn luyện
 
 Sinh ra trong thư mục `model/`:
 - `best_model.h5`

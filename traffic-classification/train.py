@@ -39,6 +39,7 @@ def parse_args():
 
 
 def compute_class_weights_from_generator(train_gen):
+    # Tính class weights để giảm lệch lớp khi huấn luyện.
     """Compute balanced class weights from training subset to reduce class bias."""
     y = train_gen.classes
     class_counts = np.bincount(y, minlength=train_gen.num_classes)
@@ -64,6 +65,7 @@ def merge_histories(history_a, history_b):
 
 
 def unfreeze_vgg16_from_layer(model: tf.keras.Model, freeze_until: str) -> None:
+    # Mở khóa dần các layer VGG16 để fine-tune.
     """Unfreeze VGG16 layers from a target layer name for fine-tuning."""
     layer_names = {layer.name for layer in model.layers}
     if freeze_until not in layer_names:
@@ -83,6 +85,7 @@ def main():
 
     os.makedirs(args.model_dir, exist_ok=True)
 
+    # Tạo bộ sinh dữ liệu train/val/test với augmentation.
     train_gen, val_gen, test_gen = create_data_generators(
         train_dir=args.train_dir,
         test_dir=args.test_dir,
@@ -91,6 +94,7 @@ def main():
         validation_split=0.2,
     )
 
+    # Xây dựng model VGG16 transfer learning.
     model = build_vgg16_transfer_model(
         input_shape=(224, 224, 3),
         num_classes=train_gen.num_classes,
@@ -104,12 +108,14 @@ def main():
     for i in range(train_gen.num_classes):
         print(f"- {idx_to_class[i]}: {int(class_counts[i])} samples, class_weight={class_weight.get(i, 1.0):.4f}")
 
+    # Lưu class map để giữ ổn định nhãn khi dự đoán.
     class_indices_path = os.path.join(args.model_dir, "class_indices.json")
     save_class_indices(train_gen.class_indices, class_indices_path)
 
     best_model_path = os.path.join(args.model_dir, "best_model.h5")
     final_model_path = os.path.join(args.model_dir, "traffic_vgg16.h5")
 
+    # Callback lưu model tốt nhất và dừng sớm.
     callbacks = [
         ModelCheckpoint(
             best_model_path,
@@ -127,6 +133,7 @@ def main():
     ]
 
     print("=== STAGE 1: TRAIN CLASSIFIER HEAD ===")
+    # Train phần head khi backbone còn đóng băng.
     head_epochs = args.epochs if args.disable_fine_tune else max(1, int(args.epochs * 0.6))
     history_head = model.fit(
         train_gen,
@@ -141,6 +148,7 @@ def main():
 
     if not args.disable_fine_tune and args.epochs > head_epochs:
         print("\n=== STAGE 2: FINE-TUNE VGG16 BACKBONE ===")
+        # Fine-tune một phần backbone với learning rate nhỏ hơn.
         unfreeze_vgg16_from_layer(model, freeze_until=args.freeze_until)
         model.compile(
             optimizer=Adam(learning_rate=args.fine_tune_lr),
@@ -161,6 +169,7 @@ def main():
 
     model.save(final_model_path)
 
+    # Đánh giá trên tập test và lưu confusion matrix.
     print("\n=== EVALUATION ON TEST SET ===")
     test_loss, test_acc = model.evaluate(test_gen, verbose=1)
     print(f"Test Loss: {test_loss:.4f}")

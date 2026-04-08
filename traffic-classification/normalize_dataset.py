@@ -22,6 +22,7 @@ VALID_READ_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
 
 def rename_class_folders(split_dir: Path) -> None:
+    # Đổi tên thư mục lớp về chuẩn (Buses/Cars/Motorbikes/Trucks).
     for old_name, new_name in FOLDER_RENAME_MAP.items():
         old_path = split_dir / old_name
         new_path = split_dir / new_name
@@ -30,6 +31,7 @@ def rename_class_folders(split_dir: Path) -> None:
 
 
 def convert_and_rename_images(class_dir: Path, prefix: str) -> int:
+    # Chuẩn hóa ảnh sang PNG và đổi tên theo prefix.
     files = sorted([p for p in class_dir.iterdir() if p.is_file() and p.suffix.lower() in VALID_READ_EXT])
     converted = 0
 
@@ -52,6 +54,7 @@ def convert_and_rename_images(class_dir: Path, prefix: str) -> int:
 
 
 def normalize_dataset(dataset_root: Path) -> None:
+    # Chuẩn hóa toàn bộ dataset theo cấu trúc train/test.
     total_files = 0
 
     for split in ["train", "test"]:
@@ -83,6 +86,7 @@ def main():
     args = parse_args()
     dataset_root = Path(args.dataset)
 
+    # Kiểm tra tồn tại dataset trước khi chạy.
     if not dataset_root.exists():
         raise FileNotFoundError(f"Dataset path not found: {dataset_root}")
 

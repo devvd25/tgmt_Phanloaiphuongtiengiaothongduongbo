@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def md5_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    # Tính hash để phát hiện ảnh trùng lặp.
     hasher = hashlib.md5()
     with path.open("rb") as f:
         while True:
@@ -32,6 +33,7 @@ def md5_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def get_class_names(train_dir: Path, test_dir: Path) -> List[str]:
+    # Lấy danh sách lớp từ cả train và test.
     class_names = set()
     if train_dir.exists():
         class_names.update([p.name for p in train_dir.iterdir() if p.is_dir()])
@@ -41,6 +43,7 @@ def get_class_names(train_dir: Path, test_dir: Path) -> List[str]:
 
 
 def collect_unique_files(train_dir: Path, test_dir: Path, class_name: str) -> List[Path]:
+    # Gom ảnh từ train/test và loại bỏ ảnh trùng theo MD5.
     candidates: List[Path] = []
     for split_dir in [train_dir / class_name, test_dir / class_name]:
         if not split_dir.exists():
@@ -59,6 +62,7 @@ def collect_unique_files(train_dir: Path, test_dir: Path, class_name: str) -> Li
 
 
 def split_files(files: List[Path], test_ratio: float, seed: int) -> Tuple[List[Path], List[Path]]:
+    # Chia dữ liệu theo tỉ lệ test, bảo đảm còn ít nhất 1 ảnh train.
     random.Random(seed).shuffle(files)
     n_total = len(files)
     n_test = max(1, int(n_total * test_ratio)) if n_total > 1 else 0
@@ -72,6 +76,7 @@ def split_files(files: List[Path], test_ratio: float, seed: int) -> Tuple[List[P
 
 
 def ensure_clean_dir(path: Path) -> None:
+    # Xóa thư mục cũ để tạo lại sạch sẽ.
     if path.exists():
         shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
@@ -83,6 +88,7 @@ def main() -> None:
     train_dir = dataset_root / "train"
     test_dir = dataset_root / "test"
 
+    # Kiểm tra đủ train/test trước khi resplit.
     if not train_dir.exists() or not test_dir.exists():
         raise FileNotFoundError("Both dataset/train and dataset/test must exist.")
 
@@ -92,6 +98,7 @@ def main() -> None:
 
     print("Classes found:", ", ".join(class_names))
 
+    # Sao lưu dữ liệu hiện tại trước khi chia lại.
     backup_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_root = dataset_root / f"_backup_before_resplit_{backup_tag}"
     backup_train = backup_root / "train"
@@ -107,6 +114,7 @@ def main() -> None:
     summary = []
 
     for class_name in class_names:
+        # Chia lại từng lớp sau khi loại trùng.
         source_files = collect_unique_files(backup_train, backup_test, class_name)
         if not source_files:
             print(f"[WARN] No files found for class {class_name}")
