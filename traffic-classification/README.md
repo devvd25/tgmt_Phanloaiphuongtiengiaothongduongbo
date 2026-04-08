@@ -1,181 +1,249 @@
-# README - Phân Loại Phương Tiện Giao Thông Đường Bộ
+# Traffic Vehicle Classification (VGG16 + YOLO)
 
-Tài liệu này mô tả đầy đủ dự án theo các câu hỏi:
-- Dùng bộ dữ liệu nào
-- Phân tích dữ liệu
-- Đặc tính đặc trưng
-- Tiền xử lý dữ liệu
-- Dùng cách nào trong code để xử lý thông tin và dự đoán ảnh
-- Cách thức hoạt động của phương pháp
+README này được cập nhật theo trạng thái dự án hiện tại.
 
-## 1) Dùng bộ dữ liệu nào
+## 1) Tổng quan
 
-Dự án sử dụng bộ dữ liệu ảnh phương tiện giao thông tải từ Kaggle, sau đó tổ chức lại theo cấu trúc thư mục phù hợp với bài toán phân loại ảnh:
+Dự án phân loại phương tiện giao thông đường bộ với 4 lớp:
+
+- Buses
+- Cars
+- Motobikes
+- Trucks
+
+Pipeline hiện tại là **YOLO phát hiện nhiều phương tiện** + **VGG16 phân loại từng xe**.
+
+Ứng dụng hỗ trợ:
+
+- Dự đoán ảnh đơn
+- Dự đoán video theo frame
+- GUI tiếng Việt (Tkinter)
+- Lưu kết quả ảnh/video
+- Xuất video kết quả gồm **2 bản**: nhanh và chậm
+- Xem lại video kết quả trong GUI
+
+## 2) Cấu trúc thư mục chính
 
 ```text
-dataset/
-├── train/
-│   ├── Buses/
-│   ├── Cars/
-│   ├── Motobikes/
-│   └── Trucks/
-└── test/
-    ├── Buses/
-    ├── Cars/
-    ├── Motobikes/
-    └── Trucks/
+traffic-classification/
+├── dataset/
+│   ├── train/
+│   │   ├── Buses/
+│   │   ├── Cars/
+│   │   ├── Motobikes/
+│   │   └── Trucks/
+│   └── test/
+│       ├── Buses/
+│       ├── Cars/
+│       ├── Motobikes/
+│       └── Trucks/
+├── model/
+│   ├── best_model.h5
+│   ├── traffic_vgg16.h5
+│   ├── class_indices.json
+│   ├── confusion_matrix.png
+│   ├── confusion_matrix.txt
+│   └── training_history.png
+├── outputs/
+├── gui.py
+├── ingest_archive_dataset.py
+├── normalize_dataset.py
+├── predict.py
+├── requirements.txt
+├── resplit_dataset.py
+├── train.py
+└── utils.py
 ```
 
-Lưu ý:
-- Dự án hỗ trợ cả tên lớp `Motobikes` và `Motorbikes` trong code để tương thích dữ liệu thực tế.
-- Định dạng ảnh chính đang dùng là `.png`.
+## 3) Bộ dữ liệu đang dùng
 
-## 2) Phân tích dữ liệu
+Nguồn dữ liệu được lấy từ Kaggle và thư mục `archive/Dataset`, sau đó nhập/chuẩn hóa về `dataset/`.
 
-Số lượng ảnh thực dùng để train/test hiện tại:
+Lưu ý tên lớp:
 
-### Train
-- Buses: 204
-- Cars: 813
-- Motobikes: 1970
-- Trucks: 268
+- Code hỗ trợ cả `Motorbikes` và `Motobikes` để tương thích dữ liệu cũ.
+- Class map đang lưu trong model hiện tại là:
 
-### Test
-- Buses: 50
-- Cars: 203
-- Motobikes: 492
-- Trucks: 66
+```json
+{
+  "Buses": 0,
+  "Cars": 1,
+  "Motobikes": 2,
+  "Trucks": 3
+}
+```
 
-Tổng ảnh trong tập train + test đang dùng: 4066.
+## 4) Thống kê dữ liệu hiện tại
 
-Nhận xét phân bố dữ liệu:
-- Dữ liệu bị mất cân bằng rõ rệt, lớp `Motobikes` lớn hơn nhiều so với `Buses` và `Trucks`.
-- Điều này dễ làm mô hình thiên lệch dự đoán về lớp chiếm ưu thế.
-- Trong ảnh giao thông thực tế thường có nhiều phương tiện trong một khung hình, làm bài toán phân loại 1 nhãn/ảnh khó hơn.
+Số lượng ảnh thực tế trong `dataset/` tại thời điểm cập nhật README:
 
-## 3) Đặc tính đặc trưng của dữ liệu
+| Class | Train | Test | Total |
+|---|---:|---:|---:|
+| Buses | 1956 | 490 | 2446 |
+| Cars | 3099 | 775 | 3874 |
+| Motobikes | 2836 | 710 | 3546 |
+| Trucks | 4020 | 866 | 4886 |
+| **Tổng** | **11911** | **2841** | **14752** |
 
-Các đặc trưng chính mà mô hình học:
-- Hình dạng tổng quát: chiều dài, chiều cao, khối thân xe.
-- Cấu trúc cục bộ: bánh xe, kính, cabin, thùng xe.
-- Màu sắc và kết cấu bề mặt (texture).
-- Ngữ cảnh nền đường và mật độ giao thông.
+## 5) Tiền xử lý và chuẩn hóa dữ liệu
 
-Các trường hợp gây nhầm lẫn thường gặp:
-- `Cars` và `Trucks` khi xe tải nhỏ hoặc góc nhìn xa.
-- `Buses` và `Cars` khi xe bus ở xa, chiếm diện tích nhỏ.
-- Ảnh có nhiều xe máy trong cùng khung hình dễ kéo xác suất về `Motobikes`.
+### Chuẩn hóa thư mục/tên file
 
-## 4) Tiền xử lý dữ liệu (đã làm và đề xuất thêm)
+Script: `normalize_dataset.py`
 
-### Các bước đã làm trong dự án
-Trong [utils.py](utils.py):
-- Resize ảnh về 224x224.
-- Chuẩn hóa pixel về [0, 1].
-- Chuyển kênh màu BGR -> RGB trước khi đưa vào model.
-- Data augmentation cho train: xoay, zoom, lật ngang.
-- Đọc ảnh đường dẫn Unicode trên Windows bằng fallback `np.fromfile + cv2.imdecode`.
+Chức năng:
 
-Trong [train.py](train.py):
-- Dùng class weights để giảm ảnh hưởng mất cân bằng lớp.
-- Huấn luyện 2 giai đoạn:
-  - Giai đoạn 1: train phần head phân loại.
-  - Giai đoạn 2: fine-tune một phần VGG16 (từ `block5_conv1`).
+- Đổi tên thư mục lớp về chuẩn: `Buses/Cars/Motorbikes/Trucks`
+- Chuyển ảnh về PNG
+- Đổi tên ảnh theo prefix (`Bus_*.png`, `Car_*.png`, ...)
 
-### Đề xuất phương án tiền xử lý bổ sung
-Nếu muốn tăng độ ổn định hơn nữa, có thể thử:
-- Random brightness/contrast để mô phỏng điều kiện ánh sáng khác nhau.
-- Random crop hoặc center crop để giảm nhiễu nền.
-- Augmentation nâng cao: MixUp/CutMix.
-- Dùng focal loss hoặc oversampling cho lớp hiếm.
+Chạy:
 
-## 5) Dùng cách nào trong code để xử lý thông tin và dự đoán ảnh
+```bash
+python normalize_dataset.py --dataset dataset
+```
 
-Dự án dùng Transfer Learning với VGG16 pretrained ImageNet.
+### Chia lại train/test có backup và loại trùng
 
-Kiến trúc mô hình trong [utils.py](utils.py):
-- Backbone: `VGG16(weights='imagenet', include_top=False)`.
-- Head phân loại: `Flatten -> Dense(256, relu) -> Dropout -> Dense(4, softmax)`.
+Script: `resplit_dataset.py`
 
-Quy trình huấn luyện trong [train.py](train.py):
-- Tạo generator train/val/test từ thư mục.
-- Train head với backbone đóng băng.
-- Fine-tune một phần backbone với learning rate nhỏ hơn.
-- Đánh giá bằng `accuracy`, `loss`, `confusion matrix`.
-- Lưu model `.h5`, class map, biểu đồ lịch sử train.
+Chức năng:
 
-Quy trình dự đoán trong [predict.py](predict.py) và [gui.py](gui.py):
-- Dò tất cả phương tiện trong ảnh bằng detector YOLO (Ultralytics).
-- Chuẩn hóa mỗi vùng xe về khung vuông (square box) rồi crop ảnh xe.
-- Chạy bộ phân loại VGG16 cho từng xe để lấy xác suất 4 lớp.
-- Vẽ khung vuông + nhãn lên từng xe và hiển thị danh sách kết quả.
+- Tạo backup trước khi chia lại
+- Loại trùng theo MD5
+- Chia train/test theo `--test_ratio`
 
-## 6) Cách thức hoạt động của phương pháp
+Chạy:
 
-Luồng hoạt động từ đầu đến cuối:
+```bash
+python resplit_dataset.py --dataset dataset --test_ratio 0.2 --seed 42
+```
 
-1. Dữ liệu ảnh được tổ chức theo từng lớp trong thư mục train/test.
-2. Bộ sinh dữ liệu tự đọc ảnh theo nhãn thư mục và áp dụng augmentation cho train.
-3. VGG16 trích xuất đặc trưng thị giác ở nhiều mức độ (cạnh, texture, hình khối).
-4. Phần head phân loại học ánh xạ từ đặc trưng sang 4 nhãn phương tiện.
-5. Sau khi head ổn định, fine-tune một phần backbone để thích nghi tốt hơn với dữ liệu thực tế.
-6. Khi dự đoán ảnh mới, mô hình trả về xác suất từng lớp; lớp có xác suất cao nhất là kết quả top-1.
+### Nhập thêm dữ liệu từ archive
 
-## 7) Frontend/Backend và chức năng từng file
+Script: `ingest_archive_dataset.py`
 
-### Frontend (UI)
-- gui.py: Giao diện Tkinter cho phép chọn ảnh, phát hiện tất cả xe trong ảnh, khoanh vùng hình vuông và hiển thị nhãn từng xe.
+Chức năng:
 
-### Backend (ML + logic xử lý)
-- train.py: Huấn luyện VGG16 transfer learning, lưu model, lịch sử train, confusion matrix.
-- predict.py: Dự đoán ảnh đơn hoặc webcam, hỗ trợ phát hiện nhiều xe và in kết quả từng box.
-- utils.py: Tiền xử lý ảnh, tạo model, multi-crop inference, đọc ảnh Unicode, phát hiện xe, phân loại từng box và vẽ kết quả.
-- normalize_dataset.py: Chuẩn hóa tên thư mục lớp và đổi tên/định dạng ảnh về PNG.
-- resplit_dataset.py: Loại trùng, chia lại train/test, tự động backup trước khi chia.
-- ingest_archive_dataset.py: Nhập dữ liệu từ thư mục archive/Dataset vào dataset hiện tại, đổi tên theo chuẩn.
+- Nhập ảnh từ `archive/Dataset` vào `dataset`
+- Chuẩn hóa sang PNG
+- Đặt tên chuẩn theo lớp
+- Bỏ qua ảnh trùng bằng fingerprint ảnh
 
-### Thư mục dữ liệu/kết quả
-- dataset/: Dữ liệu chuẩn theo train/test dùng để huấn luyện và đánh giá.
-- model/: Model đã train, class map, hình/lưu confusion matrix.
-- outputs/: Thư mục lưu output khác (nếu có).
-- archive/: Nguồn dữ liệu gốc (đã tải thêm), dùng để ingest vào dataset.
+Chạy:
 
-### Tệp cấu hình/phụ trợ
-- requirements.txt: Danh sách thư viện cần cài.
-- README.md: Tài liệu dự án.
+```bash
+python ingest_archive_dataset.py --source ../archive/Dataset --target dataset --splits train test
+```
 
-## 8) Cách chạy nhanh
+## 6) Mô hình và cách hoạt động
 
-### Cài thư viện
+### Backbone phân loại
+
+- `VGG16(weights='imagenet', include_top=False)`
+- Head: `Flatten -> Dense(256, relu) -> Dropout -> Dense(4, softmax)`
+
+### Huấn luyện
+
+Script: `train.py`
+
+Luồng huấn luyện:
+
+1. Tạo generator train/val/test với augmentation
+2. Stage 1: train classifier head (freeze backbone)
+3. Stage 2: fine-tune từ layer chỉ định (`block5_conv1` mặc định)
+4. Dùng class weights để giảm lệch lớp
+5. Lưu model + class map + biểu đồ + confusion matrix
+
+### Suy luận ảnh/video
+
+Script: `predict.py`
+
+Luồng suy luận:
+
+1. YOLO (`ultralytics`) phát hiện xe trong frame/ảnh
+2. Mỗi box được chuyển về square box
+3. Crop từng xe và đưa qua VGG16 classifier
+4. Vẽ box + nhãn + confidence
+5. Nếu không phát hiện box: fallback dự đoán toàn ảnh (multi-crop)
+
+## 7) GUI hiện tại
+
+Script: `gui.py`
+
+Tính năng chính:
+
+- Chọn ảnh/video để dự đoán
+- Dừng video bằng nút hoặc phím `q/ESC`
+- Kính lúp ảnh
+- Click trạng thái để xem trace pipeline xử lý ảnh
+- Lưu kết quả:
+  - Ảnh: lưu ảnh đã annotate
+  - Video: xuất **2 file**
+    - `*_nhanh.mp4` (nhanh, giống bản hiện tại)
+    - `*_cham.mp4` (chậm, gần tốc độ lúc phân tích)
+- Xem lại video kết quả trực tiếp trong GUI (ưu tiên bản chậm)
+
+## 8) Đánh giá mô hình (snapshot hiện tại)
+
+Từ `model/confusion_matrix.txt` (test set 2841 ảnh):
+
+```text
+475 7 0 8
+4 763 0 8
+0 0 710 0
+24 5 0 837
+```
+
+- Tổng đúng: 2785 / 2841
+- Accuracy xấp xỉ: **98.03%**
+
+Lưu ý: số liệu này thay đổi nếu bạn train lại model.
+
+## 9) Cài đặt nhanh
+
 ```bash
 pip install -r requirements.txt
 ```
 
+Thư viện chính:
+
+- tensorflow / keras
+- opencv-python
+- numpy
+- matplotlib
+- scikit-learn
+- Pillow
+- ultralytics
+
+## 10) Cách chạy nhanh
+
 ### Huấn luyện
+
 ```bash
 python train.py --epochs 15 --batch_size 32
 ```
 
-### Dự đoán 1 ảnh
+### Dự đoán ảnh
+
 ```bash
-python predict.py duong_dan_anh.png --topk 4
+python predict.py path_to_image.png --topk 4
 ```
 
-Lưu ý:
-- `--topk` là top-k cho từng xe đã phát hiện.
-- Dự án cần thư viện `ultralytics` để phát hiện nhiều phương tiện trong ảnh.
+### Dự đoán video
 
-### Mở giao diện GUI
+```bash
+python predict.py --video path_to_video.mp4 --topk 3
+```
+
+### Webcam
+
+```bash
+python predict.py --webcam --topk 3
+```
+
+### GUI
+
 ```bash
 python gui.py
 ```
-
-## 9) Tệp kết quả sau huấn luyện
-
-Sinh ra trong thư mục `model/`:
-- `best_model.h5`
-- `traffic_vgg16.h5`
-- `class_indices.json`
-- `training_history.png`
-- `confusion_matrix.png`
-- `confusion_matrix.txt`
