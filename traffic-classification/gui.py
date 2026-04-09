@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import threading
@@ -5,12 +6,17 @@ import time
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 import tensorflow as tf
 from PIL import Image, ImageTk
+
+try:
+    from yt_dlp import YoutubeDL
+except ImportError:
+    YoutubeDL = None
 
 from utils import (
     CLASS_NAMES_VN,
@@ -81,6 +87,7 @@ class TrafficClassifierGUI:
         self.photo_ref = None
         self.btn_zoom: Optional[ttk.Button] = None
         self.btn_choose_video: Optional[ttk.Button] = None
+        self.btn_predict_live: Optional[ttk.Button] = None
         self.btn_stop_video: Optional[ttk.Button] = None
         self.btn_save_result: Optional[ttk.Button] = None
         self.btn_replay_result: Optional[ttk.Button] = None
@@ -103,9 +110,11 @@ class TrafficClassifierGUI:
         self.last_result_image_bgr: Optional[np.ndarray] = None
         self.last_result_video_path: Optional[str] = None
         self.last_result_video_slow_path: Optional[str] = None
+        self.saved_live_links: List[str] = []
 
         self._configure_styles()
         self._build_ui()
+        self._load_saved_live_links()
         self._load_model()
         self.root.protocol("WM_DELETE_WINDOW", self._on_root_close)
 
@@ -189,6 +198,14 @@ class TrafficClassifierGUI:
             style="Ghost.TButton",
         )
         self.btn_choose_video.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.btn_predict_live = ttk.Button(
+            controls,
+            text="Dự đoán trực tiếp",
+            command=self.open_live_prediction_dialog,
+            style="Ghost.TButton",
+        )
+        self.btn_predict_live.pack(side=tk.LEFT, padx=(8, 0))
 
         self.btn_predict = ttk.Button(
             controls,
@@ -322,6 +339,313 @@ class TrafficClassifierGUI:
             self.status_var.set(text)
             if self.status_label is not None:
                 self.status_label.configure(style="Status.TLabel", cursor="arrow")
+
+    @staticmethod
+    def _looks_like_url(value: str) -> bool:
+        lower = value.strip().lower()
+        return lower.startswith(("http://", "https://", "rtsp://", "rtmp://", "mms://"))
+
+    def _live_links_store_path(self) -> str:
+        return os.path.join(os.path.dirname(__file__), "saved_live_links.json")
+
+    def _outputs_dir(self) -> str:
+        return os.path.join(os.path.dirname(__file__), "outputs")
+
+    def _wait_for_stop_key(self, window_title: str, wait_ms: int) -> bool:
+        """Poll key events in short slices so ESC remains responsive."""
+        remaining = max(1, int(wait_ms))
+        while remaining > 0:
+            step = min(25, remaining)
+            key = cv2.waitKey(step) & 0xFF
+            if key in (ord("q"), 27):
+                return True
+
+            try:
+                if cv2.getWindowProperty(window_title, cv2.WND_PROP_VISIBLE) < 1:
+                    return True
+            except cv2.error:
+                return True
+
+            remaining -= step
+
+        return False
+
+    def _load_saved_live_links(self) -> None:
+        self.saved_live_links = []
+        store_path = self._live_links_store_path()
+        if not os.path.exists(store_path):
+            return
+
+        try:
+            with open(store_path, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+
+        if not isinstance(raw_data, list):
+            return
+
+        for item in raw_data:
+            if not isinstance(item, str):
+                continue
+            candidate = item.strip()
+            if self._looks_like_url(candidate) and candidate not in self.saved_live_links:
+                self.saved_live_links.append(candidate)
+
+    def _persist_saved_live_links(self) -> None:
+        store_path = self._live_links_store_path()
+        try:
+            with open(store_path, "w", encoding="utf-8") as f:
+                json.dump(self.saved_live_links, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+
+    def _upsert_saved_live_link(self, live_url: str) -> None:
+        normalized = live_url.strip()
+        if not normalized:
+            return
+
+        self.saved_live_links = [url for url in self.saved_live_links if url != normalized]
+        self.saved_live_links.insert(0, normalized)
+        self.saved_live_links = self.saved_live_links[:30]
+        self._persist_saved_live_links()
+
+    def _delete_saved_live_link(self, live_url: str) -> bool:
+        normalized = live_url.strip()
+        before_len = len(self.saved_live_links)
+        self.saved_live_links = [url for url in self.saved_live_links if url != normalized]
+        changed = len(self.saved_live_links) != before_len
+        if changed:
+            self._persist_saved_live_links()
+        return changed
+
+    def _resolve_live_stream_source(self, live_url: str) -> Tuple[str, str]:
+        candidate_url = live_url.strip()
+        if not self._looks_like_url(candidate_url):
+            raise ValueError("Link trực tiếp phải bắt đầu bằng http:// hoặc https://")
+
+        lower_url = candidate_url.lower()
+        if lower_url.endswith((".m3u8", ".mpd", ".mp4", ".webm", ".flv")):
+            return candidate_url, candidate_url
+
+        if YoutubeDL is None:
+            raise ImportError("Chưa cài yt-dlp")
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "extract_flat": False,
+            "format": "best[protocol^=http][vcodec!=none][acodec!=none]/best",
+        }
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(candidate_url, download=False)
+            if info is None:
+                raise RuntimeError("Không lấy được metadata từ link trực tiếp.")
+
+            if isinstance(info, dict) and info.get("entries"):
+                entries = [entry for entry in info["entries"] if entry]
+                if not entries:
+                    raise RuntimeError("Link trực tiếp không có entry hợp lệ.")
+                info = entries[0]
+
+                if isinstance(info, dict) and info.get("_type") == "url" and info.get("url"):
+                    info = ydl.extract_info(info["url"], download=False)
+
+        if not isinstance(info, dict):
+            raise RuntimeError("Không phân tích được thông tin stream.")
+
+        stream_url = info.get("url")
+        if not stream_url:
+            formats = info.get("formats") or []
+            candidates = [fmt for fmt in formats if isinstance(fmt, dict) and fmt.get("url")]
+            if candidates:
+                best = max(
+                    candidates,
+                    key=lambda fmt: (
+                        fmt.get("height") or 0,
+                        fmt.get("tbr") or 0,
+                        fmt.get("fps") or 0,
+                    ),
+                )
+                stream_url = best.get("url")
+
+        if not stream_url:
+            raise RuntimeError("Không lấy được URL stream phát trực tiếp.")
+
+        title = str(info.get("title") or "live_stream").strip()
+        return str(stream_url), title
+
+    def open_live_prediction_dialog(self) -> None:
+        if self.video_running:
+            messagebox.showinfo("Thông báo", "Đang có video chạy. Hãy dừng trước khi mở dự đoán trực tiếp.")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Dự đoán trực tiếp từ link video")
+        dialog.geometry("860x280")
+        dialog.configure(bg="#EEF2F8")
+        dialog.resizable(False, False)
+
+        main = tk.Frame(dialog, bg="#EEF2F8", padx=14, pady=12)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        title = tk.Label(
+            main,
+            text="Nhập link live bất kỳ (YouTube Live, m3u8, ...)",
+            bg="#EEF2F8",
+            fg="#0E2036",
+            font=("Segoe UI", 12, "bold"),
+            anchor="w",
+        )
+        title.pack(fill=tk.X)
+
+        desc = tk.Label(
+            main,
+            text="Bạn có thể lưu sẵn link để lần sau chọn lại nhanh.",
+            bg="#EEF2F8",
+            fg="#4A5A73",
+            font=("Segoe UI", 10),
+            anchor="w",
+        )
+        desc.pack(fill=tk.X, pady=(2, 10))
+
+        entry_var = tk.StringVar()
+        saved_var = tk.StringVar()
+
+        entry_frame = tk.Frame(main, bg="#EEF2F8")
+        entry_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(
+            entry_frame,
+            text="Link trực tiếp:",
+            bg="#EEF2F8",
+            fg="#0E2036",
+            font=("Segoe UI", 10, "bold"),
+            width=16,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+
+        ttk.Entry(entry_frame, textvariable=entry_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        saved_frame = tk.Frame(main, bg="#EEF2F8")
+        saved_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(
+            saved_frame,
+            text="Link đã lưu:",
+            bg="#EEF2F8",
+            fg="#0E2036",
+            font=("Segoe UI", 10, "bold"),
+            width=16,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+
+        combo = ttk.Combobox(saved_frame, textvariable=saved_var, state="readonly")
+        combo["values"] = self.saved_live_links
+        combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        if self.saved_live_links:
+            combo.current(0)
+
+        def _copy_saved_to_input() -> None:
+            picked = saved_var.get().strip()
+            if picked:
+                entry_var.set(picked)
+
+        def _save_current_link() -> None:
+            candidate = entry_var.get().strip() or saved_var.get().strip()
+            if not candidate:
+                messagebox.showwarning("Cảnh báo", "Hãy nhập hoặc chọn một link trước khi lưu.")
+                return
+            if not self._looks_like_url(candidate):
+                messagebox.showwarning("Cảnh báo", "Link không hợp lệ. Link phải bắt đầu bằng http:// hoặc https://")
+                return
+
+            self._upsert_saved_live_link(candidate)
+            combo["values"] = self.saved_live_links
+            saved_var.set(candidate)
+            self._set_status("Đã lưu link trực tiếp.", clickable=False)
+
+        def _delete_selected_link() -> None:
+            target = saved_var.get().strip()
+            if not target:
+                messagebox.showinfo("Thông báo", "Chưa chọn link nào để xóa.")
+                return
+
+            removed = self._delete_saved_live_link(target)
+            if not removed:
+                return
+
+            combo["values"] = self.saved_live_links
+            if self.saved_live_links:
+                saved_var.set(self.saved_live_links[0])
+            else:
+                saved_var.set("")
+            self._set_status("Đã xóa link trực tiếp đã lưu.", clickable=False)
+
+        def _start_live_prediction() -> None:
+            live_url = entry_var.get().strip() or saved_var.get().strip()
+            if not live_url:
+                messagebox.showwarning("Cảnh báo", "Hãy nhập link trực tiếp trước.")
+                return
+            if not self._looks_like_url(live_url):
+                messagebox.showwarning("Cảnh báo", "Link không hợp lệ. Link phải bắt đầu bằng http:// hoặc https://")
+                return
+
+            self._upsert_saved_live_link(live_url)
+            dialog.destroy()
+            self.predict_live_stream(live_url)
+
+        action_bar = tk.Frame(main, bg="#EEF2F8")
+        action_bar.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Button(action_bar, text="Nạp link đã lưu", command=_copy_saved_to_input, style="Ghost.TButton").pack(
+            side=tk.LEFT
+        )
+        ttk.Button(action_bar, text="Lưu link", command=_save_current_link, style="Ghost.TButton").pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(action_bar, text="Xóa link", command=_delete_selected_link, style="Ghost.TButton").pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(action_bar, text="Dự đoán trực tiếp", command=_start_live_prediction, style="Primary.TButton").pack(
+            side=tk.RIGHT
+        )
+        ttk.Button(action_bar, text="Đóng", command=dialog.destroy, style="Ghost.TButton").pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
+
+    def predict_live_stream(self, live_url: str) -> None:
+        if self.model is None or self.idx_to_class is None:
+            messagebox.showwarning("Cảnh báo", "Model chưa được load.")
+            return
+
+        normalized_url = live_url.strip()
+        if not self._looks_like_url(normalized_url):
+            messagebox.showwarning("Cảnh báo", "Link trực tiếp không hợp lệ.")
+            return
+
+        try:
+            stream_source, stream_name = self._resolve_live_stream_source(normalized_url)
+        except ImportError:
+            messagebox.showerror(
+                "Thiếu thư viện",
+                "Chức năng link trực tiếp cần thư viện yt-dlp.\n\nCài thêm bằng lệnh:\n  pip install yt-dlp",
+            )
+            return
+        except Exception as exc:
+            messagebox.showerror("Lỗi link trực tiếp", str(exc))
+            return
+
+        self.selected_video_path = None
+        self.selected_image_path = None
+        self.selected_image_bgr = None
+        self.latest_process_trace = None
+
+        self._set_status(f"Đang kết nối nguồn trực tiếp: {stream_name}", clickable=False)
+        self.predict_video(video_source=stream_source, source_display_name=stream_name, is_live=True)
 
     def _set_save_button_enabled(self, enabled: bool) -> None:
         if self.btn_save_result is None:
@@ -514,10 +838,33 @@ class TrafficClassifierGUI:
         messagebox.showinfo("Thông báo", "Chưa có kết quả phân tích để lưu.")
 
     def _play_video_file(self, video_path: str, window_title: str) -> None:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
+        replay_candidates: List[str] = []
+        if video_path:
+            replay_candidates.append(video_path)
+
+        fast_path = self.last_result_video_path
+        if fast_path and os.path.abspath(fast_path) != os.path.abspath(video_path):
+            replay_candidates.append(fast_path)
+
+        cap: Optional[cv2.VideoCapture] = None
+        opened_path = ""
+        for candidate in replay_candidates:
+            if (not candidate) or (not os.path.exists(candidate)):
+                continue
+
+            test_cap = cv2.VideoCapture(candidate)
+            if test_cap.isOpened():
+                cap = test_cap
+                opened_path = candidate
+                break
+            test_cap.release()
+
+        if cap is None:
             messagebox.showerror("Lỗi", "Không mở được video để phát lại.")
             return
+
+        if opened_path != video_path:
+            self._set_status("Không mở được bản xem lại mặc định, đã chuyển sang bản nhanh.", clickable=False)
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         wait_ms = int(1000 / fps) if fps and fps > 1 else 30
@@ -575,14 +922,14 @@ class TrafficClassifierGUI:
                 )
                 cv2.imshow(window_title, display_frame)
 
-                key = cv2.waitKey(max(1, wait_ms)) & 0xFF
-                if key in (ord("q"), 27):
+                if self._wait_for_stop_key(window_title, wait_ms):
                     stopped_early = True
                     break
         finally:
             cap.release()
             try:
                 cv2.destroyWindow(window_title)
+                cv2.waitKey(1)
             except cv2.error:
                 pass
 
@@ -604,7 +951,8 @@ class TrafficClassifierGUI:
             messagebox.showinfo("Thông báo", "Chưa có video kết quả để xem lại.")
             return
 
-        replay_path = self.last_result_video_slow_path or self.last_result_video_path
+        # Prefer the fast file for smoother replay and better compatibility.
+        replay_path = self.last_result_video_path or self.last_result_video_slow_path
         if replay_path is None or (not os.path.exists(replay_path)):
             self._set_replay_button_enabled(False)
             messagebox.showerror("Lỗi", "Không tìm thấy file video kết quả để xem lại.")
@@ -624,6 +972,8 @@ class TrafficClassifierGUI:
             self.btn_choose.config(state=tk.DISABLED if busy else tk.NORMAL)
         if self.btn_choose_video is not None:
             self.btn_choose_video.config(state=tk.DISABLED if busy else tk.NORMAL)
+        if self.btn_predict_live is not None:
+            self.btn_predict_live.config(state=tk.DISABLED if busy else tk.NORMAL)
         if self.btn_clear is not None:
             self.btn_clear.config(state=tk.DISABLED if busy else tk.NORMAL)
 
@@ -976,6 +1326,117 @@ class TrafficClassifierGUI:
             ],
         }
 
+    def _build_trace_for_video(
+        self,
+        *,
+        is_live: bool,
+        source_name: str,
+        frame_count: int,
+        frame_has_vehicle: int,
+        total_detected_vehicles: int,
+        avg_vehicle: float,
+        class_counter: Dict[str, int],
+        input_frame: Optional[np.ndarray],
+        detector_preview: Optional[np.ndarray],
+        fallback_preview: Optional[np.ndarray],
+        progress_samples: List[Tuple[int, np.ndarray]],
+        final_frame: Optional[np.ndarray],
+        stopped_early: bool,
+        has_replay_result: bool,
+    ) -> None:
+        mode_text = "trực tiếp" if is_live else "video"
+        title = f"Quy trình xử lý {mode_text}"
+
+        summary_lines = [
+            f"Nguồn: {source_name}",
+            f"Tổng frame đã xử lý: {frame_count}",
+            f"Frame có phát hiện xe: {frame_has_vehicle}",
+            f"Tổng số xe đã phát hiện: {total_detected_vehicles}",
+            f"Trung bình xe/frame có phát hiện: {avg_vehicle:.2f}",
+        ]
+
+        top_classes = sorted(class_counter.items(), key=lambda item: item[1], reverse=True)
+        if top_classes:
+            top_desc = ", ".join(
+                [
+                    f"{CLASS_NAMES_VN.get(cls_name, cls_name)}: {count}"
+                    for cls_name, count in top_classes[:4]
+                ]
+            )
+            summary_lines.append(f"Top lớp phát hiện: {top_desc}")
+        else:
+            summary_lines.append("Không có frame nào phát hiện được box phương tiện; hệ thống dùng fallback toàn khung hình.")
+
+        summary_lines.append("Kết thúc sớm do người dùng dừng." if stopped_early else "Kết thúc tự nhiên đến cuối luồng.")
+        summary_lines.append(
+            "Có thể bấm 'Xem lại video' để phát lại kết quả đã xử lý."
+            if has_replay_result
+            else "Không tạo được file replay nên chỉ xem được trace ảnh minh họa."
+        )
+
+        steps: List[Dict[str, Any]] = []
+        if input_frame is not None:
+            steps.append(
+                {
+                    "title": "Bước 1: Khung hình đầu vào",
+                    "description": "Khung hình đầu tiên sau khi resize phục vụ suy luận realtime.",
+                    "image": input_frame.copy(),
+                }
+            )
+
+        if detector_preview is not None:
+            steps.append(
+                {
+                    "title": "Bước 2: Phát hiện phương tiện bằng YOLO",
+                    "description": (
+                        "YOLO dò box xe trên từng frame, sau đó gán nhãn detector-priority "
+                        "để bám sát hành vi camera AI realtime."
+                    ),
+                    "image": detector_preview.copy(),
+                }
+            )
+
+        if fallback_preview is not None:
+            steps.append(
+                {
+                    "title": "Bước 3: Fallback khi không có box",
+                    "description": (
+                        "Nếu frame không có box hợp lệ, hệ thống chạy multi-crop toàn khung hình "
+                        "để vẫn trả về dự đoán tham khảo."
+                    ),
+                    "image": fallback_preview.copy(),
+                }
+            )
+
+        for i, sample in enumerate(progress_samples[:2], start=1):
+            frame_idx, sample_img = sample
+            steps.append(
+                {
+                    "title": f"Bước theo dõi {i}: Mốc frame {frame_idx}",
+                    "description": "Ảnh chụp giữa quá trình để theo dõi chất lượng phát hiện theo thời gian.",
+                    "image": sample_img.copy(),
+                }
+            )
+
+        if final_frame is not None:
+            steps.append(
+                {
+                    "title": "Bước cuối: Khung hình kết thúc",
+                    "description": "Frame cuối cùng sau khi vẽ box/nhãn và trước khi tổng hợp kết quả.",
+                    "image": final_frame.copy(),
+                }
+            )
+
+        if not steps:
+            self.latest_process_trace = None
+            return
+
+        self.latest_process_trace = {
+            "title": title,
+            "summary_lines": summary_lines,
+            "steps": steps,
+        }
+
     def _open_process_trace_window(self) -> None:
         trace = self.latest_process_trace
         if trace is None:
@@ -1262,20 +1723,41 @@ class TrafficClassifierGUI:
         self._remember_image_result(vis_bgr)
         self._set_status(f"Dự đoán thành công (toàn ảnh): quét {num_views} vùng.", clickable=True)
 
-    def predict_video(self) -> None:
+    def predict_video(
+        self,
+        video_source: Optional[str] = None,
+        source_display_name: Optional[str] = None,
+        is_live: bool = False,
+    ) -> None:
         if self.model is None or self.idx_to_class is None:
             messagebox.showwarning("Cảnh báo", "Model chưa được load.")
             return
 
-        if not self.selected_video_path:
-            messagebox.showwarning("Cảnh báo", "Hãy chọn video trước.")
+        source_path = (video_source or self.selected_video_path or "").strip()
+        if not source_path:
+            if is_live:
+                messagebox.showwarning("Cảnh báo", "Hãy nhập link trực tiếp trước.")
+            else:
+                messagebox.showwarning("Cảnh báo", "Hãy chọn video trước.")
             return
 
-        self._reset_saved_result_state(clean_temp_video=True)
+        if (not is_live) and (not self._looks_like_url(source_path)) and (not os.path.exists(source_path)):
+            messagebox.showerror("Lỗi", "Không tìm thấy video đã chọn.")
+            return
 
-        cap = cv2.VideoCapture(self.selected_video_path)
+        source_name = (source_display_name or "").strip()
+        if not source_name:
+            source_name = source_path if self._looks_like_url(source_path) else os.path.basename(source_path)
+
+        self._reset_saved_result_state(clean_temp_video=True)
+        self.latest_process_trace = None
+
+        cap = cv2.VideoCapture(source_path)
         if not cap.isOpened():
-            messagebox.showerror("Lỗi", "Không mở được video đã chọn.")
+            if is_live:
+                messagebox.showerror("Lỗi", "Không mở được luồng trực tiếp từ link đã nhập.")
+            else:
+                messagebox.showerror("Lỗi", "Không mở được video đã chọn.")
             return
 
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -1292,14 +1774,15 @@ class TrafficClassifierGUI:
         screen_w = max(1, int(self.root.winfo_screenwidth()))
         screen_h = max(1, int(self.root.winfo_screenheight()))
 
-        os.makedirs("outputs", exist_ok=True)
+        outputs_dir = self._outputs_dir()
+        os.makedirs(outputs_dir, exist_ok=True)
         video_run_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
         temp_output_fast_path = os.path.join(
-            "outputs",
+            outputs_dir,
             f"_tmp_result_video_fast_{video_run_tag}.mp4",
         )
         temp_output_slow_path = os.path.join(
-            "outputs",
+            outputs_dir,
             f"_tmp_result_video_slow_{video_run_tag}.mp4",
         )
 
@@ -1307,11 +1790,18 @@ class TrafficClassifierGUI:
         import_error: Optional[Exception] = None
         stopped_early = False
         start_time = time.perf_counter()
+        trace_input_frame: Optional[np.ndarray] = None
+        trace_detector_frame: Optional[np.ndarray] = None
+        trace_fallback_frame: Optional[np.ndarray] = None
+        trace_progress_samples: List[Tuple[int, np.ndarray]] = []
 
         self.video_running = True
         self.video_stop_requested = False
         self._set_video_controls_busy(True)
-        self._set_status("Đang phân tích video...", clickable=False)
+        if is_live:
+            self._set_status(f"Đang phân tích trực tiếp: {source_name}", clickable=False)
+        else:
+            self._set_status("Đang phân tích video...", clickable=False)
 
         try:
             while True:
@@ -1324,6 +1814,8 @@ class TrafficClassifierGUI:
                     break
 
                 frame_for_ai = _resize_frame_for_video_inference(frame, max_side=1280)
+                if trace_input_frame is None:
+                    trace_input_frame = frame_for_ai.copy()
 
                 detections = detect_vehicle_boxes(
                     image_bgr=frame_for_ai,
@@ -1347,6 +1839,8 @@ class TrafficClassifierGUI:
                     vis_frame = draw_vehicle_detections(frame_for_ai, display_dets)
                     frame_has_vehicle += 1
                     total_detected_vehicles += len(display_dets)
+                    if trace_detector_frame is None:
+                        trace_detector_frame = vis_frame.copy()
                 else:
                     top_preds, _ = predict_topk_multicrop(
                         model=self.model,
@@ -1360,6 +1854,8 @@ class TrafficClassifierGUI:
                         vn_label = CLASS_NAMES_VN.get(cls_name, cls_name)
                         lines.append(f"Top{i}: {vn_label} {score * 100:.1f}%")
                     vis_frame = draw_prediction_text(frame_for_ai, lines)
+                    if trace_fallback_frame is None:
+                        trace_fallback_frame = vis_frame.copy()
 
                 if not window_initialized:
                     try:
@@ -1384,6 +1880,9 @@ class TrafficClassifierGUI:
                         temp_output_fast_path = ""
 
                 frame_count += 1
+
+                if len(trace_progress_samples) < 2 and (frame_count == 1 or frame_count % 240 == 0):
+                    trace_progress_samples.append((frame_count, vis_frame.copy()))
 
                 cv2.putText(
                     vis_frame,
@@ -1410,8 +1909,7 @@ class TrafficClassifierGUI:
                         pass
                 cv2.imshow(window_title, display_frame)
 
-                key = cv2.waitKey(max(1, wait_ms)) & 0xFF
-                if key in (ord("q"), 27):
+                if self._wait_for_stop_key(window_title, wait_ms):
                     stopped_early = True
                     break
 
@@ -1423,6 +1921,7 @@ class TrafficClassifierGUI:
                 writer.release()
             try:
                 cv2.destroyWindow(window_title)
+                cv2.waitKey(1)
             except cv2.error:
                 pass
 
@@ -1461,18 +1960,25 @@ class TrafficClassifierGUI:
 
         avg_vehicle = (total_detected_vehicles / frame_has_vehicle) if frame_has_vehicle > 0 else 0.0
 
-        self.result_main.config(text=f"OUTPUT: video ({frame_count} frame đã xử lý)")
-        self.top_title.config(text="Tóm tắt kết quả video:")
+        if is_live:
+            self.result_main.config(text=f"OUTPUT: trực tiếp ({frame_count} frame đã xử lý)")
+            self.top_title.config(text="Tóm tắt kết quả trực tiếp:")
+        else:
+            self.result_main.config(text=f"OUTPUT: video ({frame_count} frame đã xử lý)")
+            self.top_title.config(text="Tóm tắt kết quả video:")
+
+        source_line = f"- Nguồn: {source_name}"
         self.top_var.set(
             "\n".join(
                 [
+                    source_line,
                     f"- Tổng frame: {frame_count}",
                     f"- Frame có phát hiện xe: {frame_has_vehicle}",
                     f"- Tổng số xe đã phát hiện: {total_detected_vehicles}",
                     f"- Trung bình xe/frame có phát hiện: {avg_vehicle:.2f}",
                     f"- Xe máy phát hiện: {class_counter.get('Motobikes', 0)}",
                     "- Lưu kết quả sẽ xuất: 1 bản nhanh + 1 bản chậm",
-                    "- Mẹo: Nhấn q trong cửa sổ video để dừng sớm",
+                    "- Mẹo: Nhấn q hoặc ESC trong cửa sổ video để dừng sớm",
                 ]
             )
         )
@@ -1497,17 +2003,53 @@ class TrafficClassifierGUI:
                 remembered_slow_path = temp_output_slow_path
 
             self._remember_video_result(temp_output_fast_path, remembered_slow_path)
+            has_replay_result = True
         else:
             self._set_save_button_enabled(False)
             self._set_replay_button_enabled(False)
+            has_replay_result = False
 
-        self.latest_process_trace = None
-        video_name = os.path.basename(self.selected_video_path)
-        suffix = " (dừng sớm)" if stopped_early else ""
-        self._set_status(
-            f"Dự đoán video thành công: {video_name} ({frame_count} frame){suffix}. Bấm 'Xem lại video' để phát lại.",
-            clickable=False,
+        self._build_trace_for_video(
+            is_live=is_live,
+            source_name=source_name,
+            frame_count=frame_count,
+            frame_has_vehicle=frame_has_vehicle,
+            total_detected_vehicles=total_detected_vehicles,
+            avg_vehicle=avg_vehicle,
+            class_counter=class_counter,
+            input_frame=trace_input_frame,
+            detector_preview=trace_detector_frame,
+            fallback_preview=trace_fallback_frame,
+            progress_samples=trace_progress_samples,
+            final_frame=last_vis,
+            stopped_early=stopped_early,
+            has_replay_result=has_replay_result,
         )
+
+        suffix = " (dừng sớm)" if stopped_early else ""
+        status_clickable = self.latest_process_trace is not None
+        if is_live:
+            if has_replay_result:
+                self._set_status(
+                    f"Dự đoán trực tiếp thành công: {source_name} ({frame_count} frame){suffix}. Bấm 'Xem lại video' để phát lại.",
+                    clickable=status_clickable,
+                )
+            else:
+                self._set_status(
+                    f"Dự đoán trực tiếp thành công: {source_name} ({frame_count} frame){suffix}. Không tạo được file phát lại.",
+                    clickable=status_clickable,
+                )
+        else:
+            if has_replay_result:
+                self._set_status(
+                    f"Dự đoán video thành công: {source_name} ({frame_count} frame){suffix}. Bấm 'Xem lại video' để phát lại.",
+                    clickable=status_clickable,
+                )
+            else:
+                self._set_status(
+                    f"Dự đoán video thành công: {source_name} ({frame_count} frame){suffix}. Không tạo được file phát lại.",
+                    clickable=status_clickable,
+                )
 
     def clear_view(self) -> None:
         self._reset_saved_result_state(clean_temp_video=True)

@@ -17,10 +17,12 @@ Pipeline hiện tại là **YOLO phát hiện nhiều phương tiện** + **VGG1
 
 - Dự đoán ảnh đơn
 - Dự đoán video theo frame
+- Dự đoán trực tiếp từ link live (YouTube Live, m3u8...)
 - GUI tiếng Việt (Tkinter)
 - Lưu kết quả ảnh/video
 - Xuất video kết quả gồm **2 bản**: nhanh và chậm
 - Xem lại video kết quả trong GUI
+- Lưu danh sách link live để dùng lại nhanh
 
 ## 2) Cấu trúc thư mục chính
 
@@ -174,6 +176,7 @@ Script: `gui.py`
 Tính năng chính:
 
 - Chọn ảnh/video để dự đoán
+- Dự đoán trực tiếp từ link (popup nhập link, lưu link, chọn link đã lưu)
 - Dừng video bằng nút hoặc phím `q/ESC`
 - Kính lúp ảnh
 - Click trạng thái để xem trace pipeline xử lý ảnh
@@ -247,3 +250,9 @@ python predict.py --webcam --topk 3
 ```bash
 python gui.py
 ```
+
+Trong GUI:
+
+1. Bấm "Dự đoán trực tiếp"
+2. Nhập link live bất kỳ hoặc chọn link đã lưu
+3. Bấm "Dự đoán trực tiếp" để chạy
