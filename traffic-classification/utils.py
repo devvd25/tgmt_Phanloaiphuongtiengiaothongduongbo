@@ -20,6 +20,11 @@ try:
 except ImportError:
     YOLO = None
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
 CLASS_NAMES: List[str] = ["Buses", "Cars", "Motorbikes", "Trucks"]
 CLASS_NAMES_VN: Dict[str, str] = {
     "Buses": "Xe bus",
@@ -47,6 +52,34 @@ CLASS_COLORS_BGR: Dict[str, Tuple[int, int, int]] = {
     "Buses": (234, 179, 8),
     "Trucks": (239, 68, 68),
 }
+
+
+def get_yolo_runtime_device() -> str:
+    override_value = os.getenv("TRAFFIC_YOLO_DEVICE", "").strip()
+    if override_value:
+        return override_value
+
+    if torch is not None and torch.cuda.is_available():
+        return "cuda:0"
+
+    return "cpu"
+
+
+def get_yolo_runtime_info() -> Dict[str, Any]:
+    cuda_available = bool(torch is not None and torch.cuda.is_available())
+    cuda_device_count = int(torch.cuda.device_count()) if cuda_available else 0
+    cuda_device_name = torch.cuda.get_device_name(0) if cuda_device_count > 0 else None
+    override_value = os.getenv("TRAFFIC_YOLO_DEVICE", "").strip() or None
+
+    return {
+        "device": get_yolo_runtime_device(),
+        "torch_installed": torch is not None,
+        "torch_version": getattr(torch, "__version__", None) if torch is not None else None,
+        "cuda_available": cuda_available,
+        "cuda_device_count": cuda_device_count,
+        "cuda_device_name": cuda_device_name,
+        "device_override_env": override_value,
+    }
 
 
 def _resolve_class_names(train_dir: str, test_dir: str) -> List[str]:
@@ -331,6 +364,10 @@ def detect_vehicle_boxes(
     """
     detector = _get_yolo_detector(model_name=model_name)
     image_h, image_w = image_bgr.shape[:2]
+    runtime_device = get_yolo_runtime_device()
+    use_half_precision = bool(
+        runtime_device != "cpu" and torch is not None and torch.cuda.is_available()
+    )
 
     results = detector.predict(
         source=image_bgr,
@@ -338,6 +375,8 @@ def detect_vehicle_boxes(
         iou=iou_threshold,
         classes=COCO_VEHICLE_CLASS_IDS,
         max_det=max_det,
+        device=runtime_device,
+        half=use_half_precision,
         verbose=False,
     )
 

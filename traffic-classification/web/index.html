@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Phân loại phương tiện giao thông - Web GUI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/web/app.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="header-card card">
+      <div class="header-title-group">
+        <h1>Phân loại giao thông (ô tô / xe máy / xe bus / xe tải)</h1>
+        <p>Transfer Learning với VGG16 • 4 lớp •  YOLOv8 nano</p>
+      </div>
+      <div class="header-tools">
+        <label for="uiScaleSelect">Tỉ lệ giao diện</label>
+        <select id="uiScaleSelect">
+          <option value="auto" selected>Tự động vừa khung</option>
+          <option value="0.9">90% (màn nhỏ)</option>
+          <option value="1">100% (chuẩn)</option>
+          <option value="1.1">110% (thuyết trình)</option>
+          <option value="1.2">120% (màn lớn)</option>
+        </select>
+      </div>
+    </header>
+
+    <section class="toolbar card">
+      <button id="btnChooseImage" type="button" class="btn-primary">Chọn ảnh</button>
+      <button id="btnChooseVideo" type="button" class="btn-secondary">Chọn video</button>
+      <button id="btnOpenLive" type="button" class="btn-secondary">Dự đoán trực tiếp</button>
+      <button id="btnPredict" type="button" class="btn-primary" disabled>Dự đoán</button>
+      <button id="btnStop" type="button" class="btn-secondary" disabled>Dừng video</button>
+      <button id="btnClear" type="button" class="btn-secondary">Xóa</button>
+      <button id="btnSave" type="button" class="btn-secondary" disabled>Lưu kết quả</button>
+      <button id="btnReplay" type="button" class="btn-secondary" disabled>Xem lại video</button>
+    </section>
+
+    <div id="statusBar" class="status info">Sẵn sàng. Hãy chọn ảnh để dự đoán.</div>
+
+    <input id="imageInput" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp" hidden />
+    <input id="videoInput" type="file" accept=".mp4,.avi,.mov,.mkv,.wmv,.m4v" hidden />
+
+    <main class="content-grid">
+      <section class="card input-card">
+        <div class="card-head">
+          <h2>Ảnh đầu vào</h2>
+          <button id="btnZoom" type="button" class="btn-icon" disabled>🔍</button>
+        </div>
+        <div id="inputPreview" class="preview-box">
+          <p id="inputPlaceholder">Chưa có ảnh</p>
+        </div>
+        <p id="inputName" class="hint">Chọn ảnh hoặc video để bắt đầu.</p>
+      </section>
+
+      <section class="card result-card">
+        <h2>Kết quả dự đoán</h2>
+        <p id="resultMain" class="result-main">OUTPUT: loại phương tiện</p>
+        <h3 id="resultSubTitle" class="result-sub-title">Danh sách phương tiện phát hiện:</h3>
+        <pre id="resultLines" class="result-lines">-</pre>
+
+        <div id="resultMediaWrap" class="result-media hidden">
+          <div class="media-actions">
+            <button id="btnPlaySlow" type="button" class="btn-secondary small hidden">Xem bản chậm</button>
+            <button id="btnPlayFast" type="button" class="btn-secondary small hidden">Xem bản nhanh</button>
+          </div>
+          <video id="resultVideoPlayer" class="result-video hidden" controls preload="metadata" playsinline></video>
+          <img id="resultImageView" class="result-image hidden" alt="Kết quả ảnh" />
+        </div>
+
+        <p class="note">INPUT: ảnh camera / video • OUTPUT: loại phương tiện</p>
+      </section>
+    </main>
+  </div>
+
+  <div id="liveModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="liveModalTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="liveModalTitle">Dự đoán trực tiếp từ link video</h3>
+        <button id="btnCloseLiveModal" type="button" class="btn-icon">✕</button>
+      </div>
+
+      <p class="modal-desc">Nhập link live bất kỳ (YouTube Live, m3u8...) hoặc chọn từ danh sách đã lưu.</p>
+
+      <div class="field-group">
+        <label for="liveUrlInput">Link trực tiếp</label>
+        <input id="liveUrlInput" type="text" placeholder="https://www.youtube.com/watch?v=..." />
+      </div>
+
+      <div class="field-group">
+        <label for="savedLinksSelect">Link đã lưu</label>
+        <select id="savedLinksSelect">
+          <option value="">(Chưa có link)</option>
+        </select>
+      </div>
+
+      <div class="field-group">
+        <label for="resolvedLiveOutput">Kết quả đổi link YouTube -> stream trực tiếp</label>
+        <textarea
+          id="resolvedLiveOutput"
+          class="resolved-output"
+          rows="5"
+          readonly
+          placeholder="Bấm 'Đổi link YouTube' để lấy stream trực tiếp mà không cần terminal."
+        ></textarea>
+      </div>
+
+      <div class="modal-actions">
+        <button id="btnResolveLive" type="button" class="btn-secondary">Đổi link YouTube</button>
+        <button id="btnCopyResolvedLive" type="button" class="btn-secondary">Copy link đã đổi</button>
+        <button id="btnLoadSavedLink" type="button" class="btn-secondary">Nạp link đã lưu</button>
+        <button id="btnSaveLink" type="button" class="btn-secondary">Lưu link</button>
+        <button id="btnDeleteLink" type="button" class="btn-secondary">Xóa link</button>
+        <button id="btnRunLive" type="button" class="btn-primary">Dự đoán trực tiếp</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="zoomModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="zoomModalTitle">
+    <div class="modal-card modal-xl">
+      <div class="modal-head">
+        <h3 id="zoomModalTitle">Kính lúp ảnh</h3>
+        <button id="btnCloseZoomModal" type="button" class="btn-icon">✕</button>
+      </div>
+
+      <div class="zoom-tools">
+        <button id="btnZoomOut" type="button" class="btn-secondary">-</button>
+        <button id="btnZoomIn" type="button" class="btn-secondary">+</button>
+        <button id="btnZoomReset" type="button" class="btn-secondary">100%</button>
+        <button id="btnZoomFit" type="button" class="btn-secondary">Vừa khung</button>
+        <span id="zoomPercent" class="zoom-percent">100%</span>
+      </div>
+
+      <div id="zoomViewport" class="zoom-viewport">
+        <img id="zoomImage" class="zoom-image" alt="Phóng to ảnh" />
+      </div>
+    </div>
+  </div>
+
+  <div id="traceModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="traceModalTitle">
+    <div class="modal-card modal-xl">
+      <div class="modal-head">
+        <h3 id="traceModalTitle">Quy trình xử lý</h3>
+        <button id="btnCloseTraceModal" type="button" class="btn-icon">✕</button>
+      </div>
+
+      <div id="traceSummary" class="trace-summary"></div>
+
+      <div class="trace-layout">
+        <nav id="traceTabs" class="trace-tabs"></nav>
+        <section class="trace-panel">
+          <h4 id="traceStepTitle"></h4>
+          <p id="traceStepDesc"></p>
+          <img id="traceStepImage" class="trace-step-image hidden" alt="Trace step" />
+          <p id="traceStepNoImage" class="hint hidden">Không có ảnh minh họa cho bước này.</p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>
